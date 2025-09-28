@@ -9,11 +9,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python deps
+# Install Python deps and KataGo assets
 COPY requirements.txt ./
-# Install CUDA-enabled torch matching CUDA 12.1 runtime
+COPY scripts/install_katago.py ./scripts/install_katago.py
+# Install CUDA-enabled torch matching CUDA 12.1 runtime and fetch KataGo GPU bundle
 RUN pip3 install --upgrade pip && \
-	pip3 install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
+	pip3 install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121 && \
+	python3 scripts/install_katago.py
 
 COPY . .
 

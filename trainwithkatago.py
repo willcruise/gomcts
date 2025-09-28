@@ -57,6 +57,15 @@ def _auto_install_katago(force: bool = False, env_name: Optional[str] = None) ->
     if _AUTO_INSTALL_RAN and not force:
         return _repo_katago_dir()
     cmd = [sys.executable, script_path]
+    archive_hint_dirs: List[str] = []
+    repo_archive_dir = os.path.join(_repo_root(), "katago_archives")
+    if os.path.isdir(repo_archive_dir):
+        archive_hint_dirs.append(repo_archive_dir)
+    legacy_archives_dir = os.path.join(_repo_katago_dir(), "archives")
+    if os.path.isdir(legacy_archives_dir):
+        archive_hint_dirs.append(legacy_archives_dir)
+    for hint in archive_hint_dirs:
+        cmd.extend(["--archive-dir", hint])
     if force:
         cmd.append("--force")
     if env_name:
