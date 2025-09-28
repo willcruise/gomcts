@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -38,9 +39,15 @@ def _scripts_dir() -> str:
 
 
 _AUTO_INSTALL_RAN: bool = False
+_APPLIED_CONDA_PREFIX: bool = False
+_DEFAULT_KATAGO_ENV: str = "katago-env"
 
 
-def _auto_install_katago(force: bool = False) -> None:
+def _repo_katago_dir() -> Path:
+    return Path(_repo_root()) / "katago"
+
+
+def _auto_install_katago(force: bool = False, env_name: Optional[str] = None) -> Path:
     script_path = os.path.join(_scripts_dir(), "install_katago.py")
     if not os.path.isfile(script_path):
         raise FileNotFoundError(
@@ -48,10 +55,12 @@ def _auto_install_katago(force: bool = False) -> None:
         )
     global _AUTO_INSTALL_RAN
     if _AUTO_INSTALL_RAN and not force:
-        return
+        return _repo_katago_dir()
     cmd = [sys.executable, script_path]
     if force:
         cmd.append("--force")
+    if env_name:
+        cmd.extend(["--env-name", env_name])
     print("[setup] installing KataGo assets (this may take a few minutes)…")
     try:
         subprocess.run(cmd, check=True)
@@ -60,6 +69,63 @@ def _auto_install_katago(force: bool = False) -> None:
         raise RuntimeError(
             "Automatic KataGo installation failed. See output above for details."
         ) from exc
+    return _repo_katago_dir()
+
+
+def _maybe_apply_conda_prefix(prefix: Optional[Path]) -> None:
+    global _APPLIED_CONDA_PREFIX
+    if _APPLIED_CONDA_PREFIX:
+        return
+    if prefix is None:
+        return
+    prefix_path = Path(prefix).expanduser()
+    if not prefix_path.exists():
+        return
+
+    new_path_entries: List[str] = []
+    if os.name == "nt":
+        scripts_dir = prefix_path / "Scripts"
+        library_bin = prefix_path / "Library" / "bin"
+        for candidate in (scripts_dir, library_bin, prefix_path / "bin"):
+            if candidate.exists():
+                new_path_entries.append(str(candidate))
+    else:
+        bin_dir = prefix_path / "bin"
+        if bin_dir.exists():
+            new_path_entries.append(str(bin_dir))
+        lib_dir = prefix_path / "lib"
+        if lib_dir.exists():
+            ld_prev = os.environ.get("LD_LIBRARY_PATH")
+            ld_components = [str(lib_dir)]
+            if ld_prev:
+                ld_components.append(ld_prev)
+            os.environ["LD_LIBRARY_PATH"] = ":".join(ld_components)
+
+    if new_path_entries:
+        current_path = os.environ.get("PATH")
+        path_components = new_path_entries.copy()
+        if current_path:
+            path_components.append(current_path)
+        os.environ["PATH"] = os.pathsep.join(path_components)
+
+    os.environ.setdefault("KATAGO_CONDA_PREFIX", str(prefix_path))
+    _APPLIED_CONDA_PREFIX = True
+    print(f"[env] kataGo runtime prefix applied: {prefix_path}")
+
+
+def _load_katago_env_hints(katago_dir: Path) -> None:
+    prefix_hint = os.getenv("KATAGO_CONDA_PREFIX")
+    if prefix_hint:
+        _maybe_apply_conda_prefix(Path(prefix_hint))
+        return
+    hint_file = Path(katago_dir) / "conda_prefix.txt"
+    if hint_file.is_file():
+        try:
+            text = hint_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            return
+        if text:
+            _maybe_apply_conda_prefix(Path(text))
 
 
 def _resolve_device(device_arg: str, require_gpu: bool) -> str:
@@ -349,9 +415,12 @@ def _resolve_katago_assets(katago_exe: Optional[str],
 
     exe_candidates = _dedupe_preserve_order(exe_candidates_raw)
     exe_path = _take_first_existing(exe_candidates)
+    katago_dir: Optional[Path] = None
     if not exe_path and auto_install:
-        _auto_install_katago(force=force_install)
+        katago_dir = _auto_install_katago(force=force_install, env_name=_DEFAULT_KATAGO_ENV)
+        _load_katago_env_hints(katago_dir)
         exe_candidates = _dedupe_preserve_order(exe_candidates_raw)
+        exe_candidates.extend(_expand_exe_candidates(str(katago_dir), exe_names))
         exe_path = _take_first_existing(exe_candidates)
     if not exe_path:
         raise FileNotFoundError(
@@ -368,8 +437,11 @@ def _resolve_katago_assets(katago_exe: Optional[str],
     model_candidates = _dedupe_preserve_order(model_candidates_raw)
     model_path = _take_first_existing(model_candidates)
     if not model_path and auto_install:
-        _auto_install_katago(force=force_install)
+        if katago_dir is None:
+            katago_dir = _auto_install_katago(force=force_install, env_name=_DEFAULT_KATAGO_ENV)
+            _load_katago_env_hints(katago_dir)
         model_candidates = _dedupe_preserve_order(model_candidates_raw)
+        model_candidates.extend(_expand_model_candidates(str(katago_dir)))
         model_path = _take_first_existing(model_candidates)
     if not model_path:
         raise FileNotFoundError(
@@ -391,8 +463,11 @@ def _resolve_katago_assets(katago_exe: Optional[str],
     cfg_candidates = _dedupe_preserve_order(cfg_candidates_raw)
     cfg_path = _take_first_existing(cfg_candidates)
     if not cfg_path and auto_install:
-        _auto_install_katago(force=force_install)
+        if katago_dir is None:
+            katago_dir = _auto_install_katago(force=force_install, env_name=_DEFAULT_KATAGO_ENV)
+            _load_katago_env_hints(katago_dir)
         cfg_candidates = _dedupe_preserve_order(cfg_candidates_raw)
+        cfg_candidates.extend(_expand_cfg_candidates(str(katago_dir)))
         cfg_path = _take_first_existing(cfg_candidates)
     if not cfg_path:
         raise FileNotFoundError(
