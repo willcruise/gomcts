@@ -14,10 +14,13 @@ from pathlib import Path
 
 
 KATAGO_RELEASE = "v1.16.3"
-KATAGO_ARCHIVE = "katago-v1.16.3-cuda12.1-cudnn8.9.7-linux-x64.zip"
-KATAGO_SHA256 = "f09b952ebca7a72d243a211d9d16a58d65d57515091ec95692f7ebe74e252ec4"
+KATAGO_ARCHIVES = [
+    ("katago-v1.16.3-cuda12.1-cudnn8.9.7-linux-x64.zip", "f09b952ebca7a72d243a211d9d16a58d65d57515091ec95692f7ebe74e252ec4"),
+    ("katago-v1.16.3-cuda-linux-x64.zip", None),
+]
 MODEL_NAME = "kata1-b28c512nbt-s11084575488-d5365903487.bin.gz"
-KATAGO_URL = f"https://github.com/lightvector/KataGo/releases/download/{KATAGO_RELEASE}/{KATAGO_ARCHIVE}"
+def katago_url(archive_name: str) -> str:
+    return f"https://github.com/lightvector/KataGo/releases/download/{KATAGO_RELEASE}/{archive_name}"
 MODEL_URL = f"https://media.katagotraining.org/uploaded/networks/models/kata1/{MODEL_NAME}"
 
 
@@ -96,15 +99,28 @@ def download(url: str, dest: Path, sha256: str | None = None) -> None:
 
 
 def ensure_archive(force: bool, search_dirs: list[Path]) -> Path:
-    for directory in search_dirs:
-        candidate = directory / KATAGO_ARCHIVE
-        if candidate.is_file() and not force:
-            print(f"[cache] Using existing archive: {candidate}")
-            return candidate
+    for archive_name, _ in KATAGO_ARCHIVES:
+        for directory in search_dirs:
+            candidate = directory / archive_name
+            if candidate.is_file() and not force:
+                print(f"[cache] Using existing archive: {candidate}")
+                return candidate
 
-    cache_path = archives_dir() / KATAGO_ARCHIVE
-    download(KATAGO_URL, cache_path, sha256=KATAGO_SHA256)
-    return cache_path
+    errors: list[str] = []
+    for archive_name, sha256 in KATAGO_ARCHIVES:
+        cache_path = archives_dir() / archive_name
+        try:
+            download(katago_url(archive_name), cache_path, sha256=sha256)
+            return cache_path
+        except InstallError as exc:
+            errors.append(f"{archive_name}: {exc}")
+            try:
+                cache_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    details = "\n".join(errors) if errors else "no archives attempted"
+    raise InstallError(f"Failed to download KataGo archive:\n{details}")
 
 
 def extract_katago(archive: Path, target: Path) -> None:
@@ -174,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     for d in extra_dirs:
         d.mkdir(parents=True, exist_ok=True)
 
-    archive = ensure_archive(force=args.force, search_dirs=extra_dirs + [archives_dir()])
+        archive = ensure_archive(force=args.force, search_dirs=extra_dirs + [archives_dir()])
     extract_katago(archive, target_dir)
     model_filename = ensure_model(force=args.force, target=target_dir)
     write_default_cfg(target_dir, model_filename)
