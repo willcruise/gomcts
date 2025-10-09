@@ -756,7 +756,7 @@ def main() -> None:
     parser.add_argument("--temp_min", type=float, default=0.25)
     parser.add_argument("--temp_decay", type=float, default=0.995)
     parser.add_argument("--min_game_len", type=int, default=50)
-    parser.add_argument("--checkpoint_every", type=int, default=10)
+    parser.add_argument("--checkpoint_every", type=int, default=1)
     parser.add_argument("--device", type=str, default="cuda", choices=["auto", "cuda", "cpu"])
     parser.add_argument("--require_gpu", action="store_true", default=True)
     parser.add_argument(
