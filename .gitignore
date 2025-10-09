@@ -1,3 +1,4 @@
 katago/*.bin.gz
 katago/katago
 katago/*.cfg
+katago/*.bin.gz
