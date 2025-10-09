@@ -80,14 +80,8 @@ class _ScoreNode:
         N = self.N[legal].astype(np.float32)
         Qw = self.Q_win[legal]
         Qs = self.Q_score[legal]
-        # Blend Q in vectorized form
-        # Vectorized blend when using the internal blend function with constant weight
-        # Detect default blend function by identity (best effort):
-        if blend_q == self._blend_q and self.use_score_utility and self.score_weight > 0.0:
-            w = float(self.score_weight)
-            qb = ((1.0 - w) * Qw + w * Qs).astype(np.float32)
-        else:
-            qb = np.array([blend_q(float(qwi), float(qsi)) for qwi, qsi in zip(Qw.tolist(), Qs.tolist())], dtype=np.float32)
+        # Blend Q per-action using provided blend function (no external dependencies)
+        qb = np.array([blend_q(float(qwi), float(qsi)) for qwi, qsi in zip(Qw.tolist(), Qs.tolist())], dtype=np.float32)
         u = (c_puct * P * inv_sqrt) / (1.0 + N)
         scores = qb.astype(np.float32) + u.astype(np.float32)
         idx = int(np.argmax(scores))
@@ -267,11 +261,11 @@ class ScoreAwareMCTS:
                     # Create child node and advance state in-place
                     # Determine next_to_play from the resulting board after move
                     if a not in node.children:
-                        # Play move to determine next player, then undo after child creation
+                        # Play move to determine next player, then create child and continue
                         b.play(a)
                         moves_played.append(a)
                         next_to_play = 0 if int(getattr(b, "turn", -1)) == 1 else 1
-                node.children[a] = _ScoreNode(num_actions=self.num_actions, to_play=next_to_play, parent=node)
+                        node.children[a] = _ScoreNode(num_actions=self.num_actions, to_play=next_to_play, parent=node)
                         node = node.children[a]
                         continue
                     else:
