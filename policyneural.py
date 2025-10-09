@@ -280,10 +280,15 @@ def infer_policy_value_torch(net: MLPPolicyValueTorch, board: Board) -> Tuple[np
     # Forward (no grad, proper device, eval mode)
     net.fc1.eval(); net.policy_head.eval(); net.value_head.eval()
     with torch.no_grad():
-        x = torch.from_numpy(feats).to(torch.float32).to(net._device)
-        h = F.relu(net.fc1(x))
-        logits = net.policy_head(h)
-        value = torch.tanh(net.value_head(h)).detach().cpu().numpy().reshape(-1)[0]
+        # Use autocast on CUDA to leverage Tensor Cores / FP16 on Jetson
+        use_amp = (net._device.type == "cuda")
+        amp_ctx = torch.cuda.amp.autocast if use_amp else torch.cpu.amp.autocast
+        with amp_ctx(enabled=use_amp):
+            x = torch.from_numpy(feats).to(torch.float32).to(net._device)
+            h = F.relu(net.fc1(x))
+            logits = net.policy_head(h)
+            value_t = torch.tanh(net.value_head(h))
+        value = value_t.detach().cpu().numpy().reshape(-1)[0]
 
     logits_np = logits.detach().cpu().numpy().reshape(-1).astype(np.float32)
     legal = np.asarray(board.legal_moves(), dtype=np.int64)
