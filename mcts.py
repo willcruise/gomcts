@@ -11,56 +11,87 @@ def temperature_schedule(move_number: int, t0: float = 1.0, t_min: float = 0.1, 
 
 class _ScoreNode:
     """
-    Node for score-aware MCTS that tracks both winrate and score statistics per action.
-
-    - N[a]: visit count
-    - W_win[a], Q_win[a]: accumulated/mean winrate value in [-1,1]
-    - W_score[a], Q_score[a]: accumulated/mean normalized score utility in [-1,1]
-    - P[a]: prior
+    Node for score-aware MCTS using fixed-size arrays for per-action stats to reduce
+    Python overhead. Only legal actions at a node are considered during selection.
     """
 
-    def __init__(self, to_play: int, parent: Optional["_ScoreNode"] = None):
+    def __init__(self, num_actions: int, to_play: int, parent: Optional["_ScoreNode"] = None):
         self.parent: Optional[_ScoreNode] = parent
         self.to_play: int = to_play
         self.children: Dict[int, _ScoreNode] = {}
-        self.P: Dict[int, float] = {}
-        self.N: Dict[int, int] = {}
-        self.W_win: Dict[int, float] = {}
-        self.Q_win: Dict[int, float] = {}
-        self.W_score: Dict[int, float] = {}
-        self.Q_score: Dict[int, float] = {}
+        self.num_actions: int = int(num_actions)
+        self.P: np.ndarray = np.zeros((self.num_actions,), dtype=np.float32)
+        self.N: np.ndarray = np.zeros((self.num_actions,), dtype=np.int32)
+        self.W_win: np.ndarray = np.zeros((self.num_actions,), dtype=np.float32)
+        self.Q_win: np.ndarray = np.zeros((self.num_actions,), dtype=np.float32)
+        self.W_score: np.ndarray = np.zeros((self.num_actions,), dtype=np.float32)
+        self.Q_score: np.ndarray = np.zeros((self.num_actions,), dtype=np.float32)
+        self._legal: np.ndarray = np.zeros((0,), dtype=np.int32)
+        self._expanded: bool = False
 
     def is_expanded(self) -> bool:
-        return len(self.P) > 0
+        return bool(self._expanded)
 
     def expand(self, legal_actions: List[int], priors: np.ndarray) -> None:
-        priors = np.asarray(priors, dtype=np.float64)
-        p = np.array([max(0.0, float(priors[a])) for a in legal_actions], dtype=np.float64)
-        s = float(np.sum(p))
+        priors = np.asarray(priors, dtype=np.float32)
+        legal = np.asarray(list(map(int, legal_actions)), dtype=np.int32)
+        if legal.size == 0:
+            self._legal = np.zeros((0,), dtype=np.int32)
+            self._expanded = True
+            return
+        p_raw = np.maximum(0.0, priors[legal])
+        s = float(np.sum(p_raw))
         if s <= 0.0:
-            p = np.ones_like(p) / max(1, len(p))
+            p = np.ones_like(p_raw) / float(len(legal))
         else:
-            p = p / s
-        for a, pa in zip(legal_actions, p):
-            self.P[a] = float(pa)
-            self.N[a] = 0
-            self.W_win[a] = 0.0
-            self.Q_win[a] = 0.0
-            self.W_score[a] = 0.0
-            self.Q_score[a] = 0.0
+            p = (p_raw / s)
+        # Optional top-K pruning based on prior
+        max_k = None
+        try:
+            # Look through tree root reference if available
+            root = self
+            while getattr(root, 'parent', None) is not None:
+                root = root.parent  # type: ignore[assignment]
+            tree = getattr(root, 'tree', None)
+            if tree is not None:
+                max_k = getattr(tree, 'max_children_per_node', None)
+        except Exception:
+            max_k = None
+        if max_k is not None and int(max_k) > 0 and legal.size > int(max_k):
+            idx_sorted = np.argsort(-p)
+            keep_idx = idx_sorted[: int(max_k)]
+            keep_actions = legal[keep_idx]
+            self.P[:] = 0.0
+            self.P[keep_actions] = p[keep_idx].astype(np.float32)
+            self._legal = keep_actions
+        else:
+            self.P[legal] = p.astype(np.float32, copy=False)
+            self._legal = legal
+        self._expanded = True
 
     def best_action(self, c_puct: float, blend_q: Callable[[float, float], float]) -> int:
-        total_visits = 1 + sum(self.N.values())
-        best_score = -1e18
-        best_a = None
-        for a in self.P.keys():
-            q_blend = blend_q(self.Q_win[a], self.Q_score[a])
-            u = c_puct * self.P[a] * math.sqrt(total_visits) / (1 + self.N[a])
-            score = q_blend + u
-            if score > best_score:
-                best_score = score
-                best_a = a
-        return int(best_a)
+        legal = self._legal
+        if legal.size == 0:
+            return 0  # fallback
+        total_visits = 1 + int(self.N[legal].sum())
+        inv_sqrt = 1.0 / math.sqrt(total_visits)
+        # Gather arrays for legal indices
+        P = self.P[legal]
+        N = self.N[legal].astype(np.float32)
+        Qw = self.Q_win[legal]
+        Qs = self.Q_score[legal]
+        # Blend Q in vectorized form
+        # Vectorized blend when using the internal blend function with constant weight
+        # Detect default blend function by identity (best effort):
+        if blend_q == self._blend_q and self.use_score_utility and self.score_weight > 0.0:
+            w = float(self.score_weight)
+            qb = ((1.0 - w) * Qw + w * Qs).astype(np.float32)
+        else:
+            qb = np.array([blend_q(float(qwi), float(qsi)) for qwi, qsi in zip(Qw.tolist(), Qs.tolist())], dtype=np.float32)
+        u = (c_puct * P * inv_sqrt) / (1.0 + N)
+        scores = qb.astype(np.float32) + u.astype(np.float32)
+        idx = int(np.argmax(scores))
+        return int(legal[idx])
 
 
 class ScoreAwareMCTS:
@@ -78,6 +109,7 @@ class ScoreAwareMCTS:
         next_state_fn: Callable[[Any, int], Any],
         is_terminal_fn: Callable[[Any], bool],
         policy_value_fn: Callable[[Any], Tuple[np.ndarray, float]],
+        policy_value_batch_fn: Optional[Callable[[np.ndarray, int], Tuple[np.ndarray, np.ndarray]]] = None,
         current_player_fn: Optional[Callable[[Any], int]] = None,
         c_puct: float = 1.5,
         root_dirichlet_alpha: Optional[float] = None,
@@ -89,12 +121,18 @@ class ScoreAwareMCTS:
         score_weight: float = 0.25,
         score_norm_scale: Optional[float] = None,
         score_estimator_fn: Optional[Callable[[Any], float]] = None,
+        # Performance: if True and the state supports play()/undo(), run simulations
+        # by mutating the root state in-place with full undo, avoiding clone()
+        use_inplace_simulation: bool = True,
+        # Limit number of children expanded per node by prior (progressive widening / prior pruning)
+        max_children_per_node: Optional[int] = None,
     ) -> None:
         self.num_actions = int(num_actions)
         self.legal_actions_fn = legal_actions_fn
         self.next_state_fn = next_state_fn
         self.is_terminal_fn = is_terminal_fn
         self.policy_value_fn = policy_value_fn
+        self.policy_value_batch_fn = policy_value_batch_fn
         self.current_player_fn = current_player_fn
         self.c_puct = float(c_puct)
         self.root_dirichlet_alpha = root_dirichlet_alpha
@@ -107,12 +145,15 @@ class ScoreAwareMCTS:
         self.score_weight = float(np.clip(score_weight, 0.0, 1.0))
         self._score_norm_scale_static = None if score_norm_scale is None else float(max(1e-6, score_norm_scale))
         self._score_estimator_fn = score_estimator_fn
+        self.use_inplace_simulation = bool(use_inplace_simulation)
+        self.max_children_per_node = None if max_children_per_node is None else int(max(1, max_children_per_node))
 
         self.root: Optional[_ScoreNode] = None
+        self._last_action: Optional[int] = None
 
     def run(self, root_state: Any, num_simulations: int) -> None:
         to_play = self._current_player(root_state, default=0)
-        self.root = _ScoreNode(to_play=to_play)
+        self.root = _ScoreNode(num_actions=self.num_actions, to_play=to_play)
 
         # Expand root
         legal = self.legal_actions_fn(root_state)
@@ -127,23 +168,45 @@ class ScoreAwareMCTS:
             if alpha is None or alpha <= 0:
                 c0 = getattr(self, "root_dirichlet_c0", 10.0)
                 alpha = float(c0) / float(len(legal))
-            noise = self.rng.dirichlet([alpha] * len(legal))
-            for a, n in zip(legal, noise):
-                self.root.P[a] = (1 - self.root_dirichlet_frac) * self.root.P[a] + self.root_dirichlet_frac * float(n)
+            noise = self.rng.dirichlet([alpha] * len(legal)).astype(np.float32)
+            lidx = np.asarray(legal, dtype=np.int32)
+            self.root.P[lidx] = (1.0 - self.root_dirichlet_frac) * self.root.P[lidx] + self.root_dirichlet_frac * noise
 
-        for _ in range(int(num_simulations)):
-            self._simulate(root_state)
+        # If batch function available, run batched simulation path
+        if self.policy_value_batch_fn is not None and int(num_simulations) > 1:
+            self._run_batched(root_state, int(num_simulations))
+        else:
+            for _ in range(int(num_simulations)):
+                self._simulate(root_state)
+
+    def advance_root(self, action: int) -> None:
+        """Advance the root to the selected child if available, preserving subtree.
+
+        If the child doesn't exist, drop the tree (root=None) so the next run starts fresh.
+        """
+        if self.root is None:
+            self._last_action = None
+            return
+        a = int(action)
+        child = self.root.children.get(a)
+        if child is None:
+            # Drop tree when we don't have this branch
+            self.root = None
+            self._last_action = None
+            return
+        # Detach parent references to allow GC
+        child.parent = None
+        self.root = child
+        self._last_action = a
 
     def get_action_probs(self, temp: float = 1.0) -> np.ndarray:
         if self.root is None:
             raise RuntimeError("run() must be called before get_action_probs().")
-        visits = np.zeros(self.num_actions, dtype=np.float64)
-        for a, n in self.root.N.items():
-            visits[a] = n
+        visits = self.root.N.astype(np.float64)
+        legal_actions = self.root._legal.tolist()
         if temp <= 1e-6:
             if float(visits.sum()) <= 0.0:
                 pi = np.zeros_like(visits)
-                legal_actions = list(self.root.P.keys())
                 if len(legal_actions) == 0:
                     return np.ones_like(visits) / len(visits)
                 pi[legal_actions] = 1.0 / float(len(legal_actions))
@@ -156,7 +219,6 @@ class ScoreAwareMCTS:
         s = np.sum(x)
         if s <= 0:
             pi = np.zeros_like(x)
-            legal_actions = list(self.root.P.keys())
             if len(legal_actions) == 0:
                 return np.ones_like(x) / len(x)
             pi[legal_actions] = 1.0 / float(len(legal_actions))
@@ -175,37 +237,88 @@ class ScoreAwareMCTS:
 
     def _simulate(self, root_state: Any) -> None:
         assert self.root is not None
-        node = self.root
-        state = root_state
-        search_path: List[Tuple[_ScoreNode, int]] = []  # (node, action)
+        # In-place fast path if the board exposes play()/undo()
+        if self.use_inplace_simulation and hasattr(root_state, "play") and hasattr(root_state, "undo"):
+            b = root_state
+            node = self.root
+            search_path: List[Tuple[_ScoreNode, int]] = []
+            moves_played: List[int] = []
+            try:
+                while True:
+                    if self.is_terminal_fn(b):
+                        terminal_win = self._terminal_value(b, node.to_play)
+                        terminal_score = self._terminal_score_value(b, node.to_play)
+                        self._backup(search_path, terminal_win, terminal_score)
+                        return
 
-        while True:
-            if self.is_terminal_fn(state):
-                terminal_win = self._terminal_value(state, node.to_play)
-                terminal_score = self._terminal_score_value(state, node.to_play)
-                self._backup(search_path, terminal_win, terminal_score)
-                return
+                    if not node.is_expanded():
+                        legal = self.legal_actions_fn(b)
+                        priors, v_win = self.policy_value_fn(b)
+                        if priors.shape[0] != self.num_actions:
+                            raise ValueError(f"priors length {priors.shape[0]} != num_actions {self.num_actions}")
+                        node.expand(legal, priors)
+                        v_score = self._score_value_from_state(b, node.to_play)
+                        self._backup(search_path, float(v_win), float(v_score))
+                        return
 
-            if not node.is_expanded():
-                legal = self.legal_actions_fn(state)
-                priors, v_win = self.policy_value_fn(state)
-                if priors.shape[0] != self.num_actions:
-                    raise ValueError(f"priors length {priors.shape[0]} != num_actions {self.num_actions}")
-                node.expand(legal, priors)
-                v_score = self._score_value_from_state(state, node.to_play)
-                self._backup(search_path, float(v_win), float(v_score))
-                return
+                    a = node.best_action(self.c_puct, self._blend_q)
+                    search_path.append((node, a))
 
-            a = node.best_action(self.c_puct, self._blend_q)
-            search_path.append((node, a))
+                    # Create child node and advance state in-place
+                    # Determine next_to_play from the resulting board after move
+                    if a not in node.children:
+                        # Play move to determine next player, then undo after child creation
+                        b.play(a)
+                        moves_played.append(a)
+                        next_to_play = 0 if int(getattr(b, "turn", -1)) == 1 else 1
+                node.children[a] = _ScoreNode(num_actions=self.num_actions, to_play=next_to_play, parent=node)
+                        node = node.children[a]
+                        continue
+                    else:
+                        b.play(a)
+                        moves_played.append(a)
+                        node = node.children[a]
+            finally:
+                # Ensure we restore root_state regardless of exit path
+                for _ in range(len(moves_played)):
+                    getattr(root_state, "undo")()
+        else:
+            # Fallback: clone-based state progression
+            node = self.root
+            state = root_state
+            search_path: List[Tuple[_ScoreNode, int]] = []  # (node, action)
 
-            next_state = self.next_state_fn(state, a)
-            next_to_play = 1 - node.to_play if self.current_player_fn is None else self._current_player(next_state, default=1 - node.to_play)
-            if a not in node.children:
-                node.children[a] = _ScoreNode(to_play=next_to_play, parent=node)
+            while True:
+                if self.is_terminal_fn(state):
+                    terminal_win = self._terminal_value(state, node.to_play)
+                    terminal_score = self._terminal_score_value(state, node.to_play)
+                    self._backup(search_path, terminal_win, terminal_score)
+                    return
 
-            state = next_state
-            node = node.children[a]
+                if not node.is_expanded():
+                    legal = self.legal_actions_fn(state)
+                    priors, v_win = self.policy_value_fn(state)
+                    if priors.shape[0] != self.num_actions:
+                        raise ValueError(f"priors length {priors.shape[0]} != num_actions {self.num_actions}")
+                    node.expand(legal, priors)
+                    v_score = self._score_value_from_state(state, node.to_play)
+                    self._backup(search_path, float(v_win), float(v_score))
+                    return
+
+                a = node.best_action(self.c_puct, self._blend_q)
+                search_path.append((node, a))
+
+                next_state = self.next_state_fn(state, a)
+                # Fast detect next_to_play using board.turn if available
+                if self.current_player_fn is None and hasattr(next_state, 'turn'):
+                    next_to_play = 0 if int(getattr(next_state, 'turn')) == 1 else 1
+                else:
+                    next_to_play = 1 - node.to_play if self.current_player_fn is None else self._current_player(next_state, default=1 - node.to_play)
+                if a not in node.children:
+                    node.children[a] = _ScoreNode(num_actions=self.num_actions, to_play=next_to_play, parent=node)
+
+                state = next_state
+                node = node.children[a]
 
     def _backup(self, search_path: List[Tuple[_ScoreNode, int]], v_win_leaf: float, v_score_leaf: float) -> None:
         w = float(v_win_leaf)
@@ -270,3 +383,68 @@ class ScoreAwareMCTS:
             return float(black - white)
         except Exception:
             return 0.0
+
+    # ----- Batched simulation -----
+    def _run_batched(self, root_state: Any, num_simulations: int, batch_size: int = 16, flush_timeout_ms: float = 2.0) -> None:
+        assert self.root is not None
+        b = root_state
+        leaves: List[Tuple[_ScoreNode, List[Tuple[_ScoreNode, int]], List[int], np.ndarray]] = []
+        sims_done = 0
+        while sims_done < int(num_simulations):
+            leaves.clear()
+            # Phase A: selection only, collect up to batch_size leaves, or flush on timeout
+            import time
+            deadline = time.time() + float(flush_timeout_ms) / 1000.0
+            while len(leaves) < int(batch_size) and sims_done + len(leaves) < int(num_simulations):
+                node = self.root
+                search_path: List[Tuple[_ScoreNode, int]] = []
+                moves_played: List[int] = []
+                while True:
+                    if self.is_terminal_fn(b):
+                        terminal_win = self._terminal_value(b, node.to_play)
+                        terminal_score = self._terminal_score_value(b, node.to_play)
+                        self._backup(search_path, terminal_win, terminal_score)
+                        # undo played moves for this descent
+                        for _u in range(len(moves_played)):
+                            getattr(b, "undo")()
+                        break
+                    if not node.is_expanded():
+                        feats = b.to_features().astype(np.float32).reshape(1, -1)
+                        leaves.append((node, search_path, moves_played.copy(), feats.reshape(-1)))
+                        # Undo before next descent
+                        for _u in range(len(moves_played)):
+                            getattr(b, "undo")()
+                        break
+                    a = node.best_action(self.c_puct, self._blend_q)
+                    search_path.append((node, a))
+                    b.play(a)
+                    moves_played.append(a)
+                    if a not in node.children:
+                        next_to_play = 0 if int(getattr(b, "turn", -1)) == 1 else 1
+                        node.children[a] = _ScoreNode(num_actions=self.num_actions, to_play=next_to_play, parent=node)
+                    node = node.children[a]
+                # Flush early if timeout reached
+                if time.time() >= deadline:
+                    break
+
+            if not leaves:
+                sims_done += batch_size
+                continue
+
+            # Phase B: batched inference
+            feats_batch = np.stack([fv for (_, _, _, fv) in leaves], axis=0)
+            pri_batch, v_batch = self.policy_value_batch_fn(feats_batch, self.num_actions)  # type: ignore[misc]
+
+            # Phase C: expand + backup
+            for (node, search_path, moves_played, _fv), pri, v in zip(leaves, pri_batch, v_batch):
+                # Re-enter leaf to compute legal
+                for a in moves_played:
+                    b.play(int(a))
+                legal = self.legal_actions_fn(b)
+                node.expand(legal, pri)
+                v_score = self._score_value_from_state(b, node.to_play)
+                self._backup(search_path, float(v), float(v_score))
+                for _u in range(len(moves_played)):
+                    getattr(b, "undo")()
+
+            sims_done += len(leaves)

@@ -37,13 +37,42 @@ class Board:
         # Track total captures by each player (for scoring)
         self.captures_black = 0
         self.captures_white = 0
+        # Zobrist hashing tables and incremental hash
+        self._zobrist_init()
+        self._zobrist_hash = self._zobrist_hash_full()
+        # Cache for legal moves keyed by position hash/config
+        self._legal_cache_key = None
+        self._legal_cache = None
 
     @property
     def pass_index(self) -> int:
         return self.size * self.size
 
     def clone(self):
-        return deepcopy(self)
+        """Efficient clone: copy arrays/lists without Python deepcopy overhead."""
+        b = Board(self.size,
+                  strict_illegals=self._strict_illegals,
+                  enforce_rules=self._enforce_rules,
+                  forbid_suicide=self._forbid_suicide,
+                  ko_rule=self._ko_rule)
+        b.turn = int(self.turn)
+        b.grid = self.grid.copy()
+        b.history = list(self.history)
+        b.rule_info = float(self.rule_info)
+        b.komi = float(self.komi)
+        # Copy internals (lightweight):
+        # - position histories are small bytes arrays; copy lists directly
+        b._position_history = list(self._position_history)
+        if hasattr(self, '_position_history_pos'):
+            b._position_history_pos = list(self._position_history_pos)
+        if hasattr(self, '_psk_set'):
+            b._psk_set = set(self._psk_set)
+        # - move stack is not needed for forward-only simulation; avoid deep copy
+        b._move_stack = []
+        b.captures_black = int(self.captures_black)
+        b.captures_white = int(self.captures_white)
+        # Do not copy caches
+        return b
 
     def legal_moves(self):
         """
@@ -51,6 +80,13 @@ class Board:
         Disallow placing on occupied intersections; PASS always legal.
         If enhanced rules enabled, also disallow suicide and ko per configuration.
         """
+        # Cache lookup by turn-aware position hash + rule flags
+        try:
+            key = (self._position_history[-1], self._enforce_rules, self._forbid_suicide, self._ko_rule)
+            if self._legal_cache_key == key and self._legal_cache is not None:
+                return self._legal_cache.copy()
+        except Exception:
+            pass
         if not self._enforce_rules and not self._forbid_suicide and self._ko_rule is None:
             legal = []
             N = self.size
@@ -59,29 +95,45 @@ class Board:
                     if self.grid[r, c] == 0:
                         legal.append(r * N + c)
             legal.append(self.pass_index)
-            return np.array(legal, dtype=np.int64)
+            arr = np.array(legal, dtype=np.int64)
+            try:
+                self._legal_cache_key = key
+                self._legal_cache = arr
+            except Exception:
+                pass
+            return arr
 
         legal = []
         N = self.size
-        for r in range(N):
-            for c in range(N):
-                if self.grid[r, c] != 0:
-                    continue
-                move = r * N + c
-                if self._is_legal(move):
-                    legal.append(move)
+        empties = np.flatnonzero(self.grid.reshape(-1) == 0)
+        for move in empties.tolist():
+            if self._is_legal(int(move)):
+                legal.append(int(move))
         legal.append(self.pass_index)
-        return np.array(legal, dtype=np.int64)
+        arr = np.array(legal, dtype=np.int64)
+        try:
+            self._legal_cache_key = key
+            self._legal_cache = arr
+        except Exception:
+            pass
+        return arr
 
     def play(self, move: int):
         """Apply move in-place. If rules are enabled, enforce captures/suicide/ko.
 
         Behavior with defaults remains identical to the previous implementation.
         """
+        # Invalidate legal cache on any state change
+        self._legal_cache_key = None; self._legal_cache = None
         if move == self.pass_index:
             self.history.append(self.pass_index)
             # Update position history for pass (turn changes, stones unchanged)
             self.turn *= -1
+            # Update Zobrist for turn flip
+            try:
+                self._zobrist_hash ^= self._zobrist_turn_key
+            except Exception:
+                pass
             new_hash = self._hash_from(self.grid, self.turn)
             self._position_history.append(new_hash)
             new_poshash = self._poshash_from(self.grid)
@@ -111,9 +163,19 @@ class Board:
                 raise ValueError("Illegal move: point already occupied")
             # ignore illegal overwrite to preserve previous workflow
             return
-        self.grid[r, c] = 1 if self.turn == 1 else -1
+        color = 1 if self.turn == 1 else -1
+        self.grid[r, c] = color
+        # Update Zobrist for placement
+        try:
+            self._zobrist_hash ^= (self._zobrist_black[r, c] if color == 1 else self._zobrist_white[r, c])
+        except Exception:
+            pass
         self.history.append(int(move))
         self.turn *= -1
+        try:
+            self._zobrist_hash ^= self._zobrist_turn_key
+        except Exception:
+            pass
         # Update position history even in legacy mode to keep internals consistent
         new_hash = self._hash_from(self.grid, self.turn)
         self._position_history.append(new_hash)
@@ -168,6 +230,7 @@ class Board:
 
     def undo(self) -> bool:
         """Undo last move. Returns True if undone, False if no history."""
+        self._legal_cache_key = None; self._legal_cache = None
         if not self.history:
             return False
         last = self.history.pop()
@@ -186,7 +249,16 @@ class Board:
             N = self.size
             r, c = divmod(int(last), N)
             # Clear the placed stone
+            color_cleared = self.grid[r, c]
             self.grid[r, c] = 0
+            # Update Zobrist for removal (XOR same key)
+            try:
+                if int(color_cleared) == 1:
+                    self._zobrist_hash ^= self._zobrist_black[r, c]
+                elif int(color_cleared) == -1:
+                    self._zobrist_hash ^= self._zobrist_white[r, c]
+            except Exception:
+                pass
         # Restore captures if any
         if self._move_stack:
             info = self._move_stack.pop()
@@ -200,17 +272,55 @@ class Board:
                     self.captures_white -= num_caps
             for rr, cc, color in info.get('captures', []):
                 self.grid[rr, cc] = color
+                # Reapply captured stones into Zobrist
+                try:
+                    if int(color) == 1:
+                        self._zobrist_hash ^= self._zobrist_black[rr, cc]
+                    elif int(color) == -1:
+                        self._zobrist_hash ^= self._zobrist_white[rr, cc]
+                except Exception:
+                    pass
         return True
 
     # -------------------- Enhanced rules helpers --------------------
 
     def _hash_from(self, grid: np.ndarray, turn: int) -> bytes:
-        # Include side-to-play in the position signature
-        return (b"B" if turn == 1 else b"W") + grid.tobytes()
+        # Include side-to-play; prefer Zobrist hash when available for speed
+        try:
+            z = self._zobrist_hash if turn == self.turn else self._zobrist_hash ^ self._zobrist_turn_key
+            # Return as bytes (8-byte little-endian)
+            return int(z & 0xFFFFFFFFFFFFFFFF).to_bytes(8, byteorder="little", signed=False)
+        except Exception:
+            return (b"B" if turn == 1 else b"W") + grid.tobytes()
 
     def _poshash_from(self, grid: np.ndarray) -> bytes:
-        # Turn-agnostic board signature for true positional superko
-        return grid.tobytes()
+        try:
+            return int(self._zobrist_hash & 0xFFFFFFFFFFFFFFFF).to_bytes(8, byteorder="little", signed=False)
+        except Exception:
+            return grid.tobytes()
+
+    # -------------------- Zobrist hashing helpers --------------------
+    def _zobrist_init(self) -> None:
+        rng = np.random.RandomState(123456789)
+        N = int(self.size)
+        # 3 states per point: empty, black, white -> we use only black/white keys
+        self._zobrist_black = rng.randint(1, 2**63 - 1, size=(N, N), dtype=np.int64)
+        self._zobrist_white = rng.randint(1, 2**63 - 1, size=(N, N), dtype=np.int64)
+        self._zobrist_turn_key = np.int64(rng.randint(1, 2**63 - 1, dtype=np.int64))
+
+    def _zobrist_hash_full(self) -> np.int64:
+        N = int(self.size)
+        h = np.int64(0)
+        for r in range(N):
+            for c in range(N):
+                v = int(self.grid[r, c])
+                if v == 1:
+                    h ^= self._zobrist_black[r, c]
+                elif v == -1:
+                    h ^= self._zobrist_white[r, c]
+        if int(self.turn) == -1:
+            h ^= self._zobrist_turn_key
+        return np.int64(h)
 
     def _is_legal(self, move: int) -> bool:
         if move == self.pass_index:

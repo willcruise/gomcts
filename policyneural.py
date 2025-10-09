@@ -29,6 +29,14 @@ class MLPPolicyValueTorch:  # type: ignore[override]
         self.rng = np.random.RandomState(seed)
         self._device = torch.device(device)
         torch.manual_seed(int(seed))
+        # Prefer high-throughput matmul on CUDA (Ampere supports TF32)
+        try:
+            if self._device.type == "cuda":
+                torch.set_float32_matmul_precision("high")
+                torch.backends.cuda.matmul.allow_tf32 = True  # type: ignore[attr-defined]
+                torch.backends.cudnn.allow_tf32 = True  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
         self.input_dim: int = 0
         self.policy_dim: int = 0
@@ -39,6 +47,16 @@ class MLPPolicyValueTorch:  # type: ignore[override]
         self._loaded_once = False
         # Load if possible (will defer layer creation until dims are known)
         self._maybe_load()
+
+        # Runtime batching helpers
+        self._copy_stream: Optional[torch.cuda.Stream] = None  # type: ignore[name-defined]
+        self._pinned_batch: Optional[torch.Tensor] = None
+        self._gpu_input_batch: Optional[torch.Tensor] = None
+        self._batch_feature_dim: int = 0
+        self._batch_capacity: int = 0
+        self._graph: Optional[torch.cuda.CUDAGraph] = None  # type: ignore[name-defined]
+        self._graph_logits: Optional[torch.Tensor] = None
+        self._graph_values: Optional[torch.Tensor] = None
 
     # ----- persistence helpers -----
     def _weights_path_pt(self) -> str:
@@ -180,6 +198,85 @@ class MLPPolicyValueTorch:  # type: ignore[override]
         self.value_head = nn.Linear(self.hidden_size, 1, bias=True).to(self._device)
         # Kaiming initialization is already used by default for Linear; keep defaults
 
+    # ----- batched runtime setup -----
+    def ensure_batch_runtime(self, batch_size: int, feature_dim: int, use_cuda_graph: bool = False) -> None:
+        if self._device.type != "cuda":
+            # CPU path: nothing to set up beyond dims; fall back to normal batched forward
+            self._batch_capacity = int(max(self._batch_capacity, batch_size))
+            self._batch_feature_dim = int(feature_dim)
+            return
+        import torch.cuda
+        if self._copy_stream is None:
+            self._copy_stream = torch.cuda.Stream()
+        need_alloc = (
+            self._pinned_batch is None
+            or self._gpu_input_batch is None
+            or int(self._batch_capacity) < int(batch_size)
+            or int(self._batch_feature_dim) != int(feature_dim)
+        )
+        if need_alloc:
+            self._batch_capacity = int(batch_size)
+            self._batch_feature_dim = int(feature_dim)
+            self._pinned_batch = torch.empty((self._batch_capacity, self._batch_feature_dim), dtype=torch.float32).pin_memory()
+            self._gpu_input_batch = torch.empty((self._batch_capacity, self._batch_feature_dim), dtype=torch.float32, device=self._device)
+            # Rebuild graph on reallocation
+            self._graph = None
+            self._graph_logits = None
+            self._graph_values = None
+        if use_cuda_graph and self._graph is None:
+            # Warmup and capture static forward graph on fixed shapes
+            torch.cuda.synchronize()
+            self.fc1.eval(); self.policy_head.eval(); self.value_head.eval()
+            # Warmup allocate kernels
+            with torch.no_grad():
+                h = F.relu(self.fc1(self._gpu_input_batch))  # type: ignore[arg-type]
+                logits = self.policy_head(h)
+                values_t = torch.tanh(self.value_head(h)).reshape(-1)
+            torch.cuda.synchronize()
+            # Capture
+            g = torch.cuda.CUDAGraph()
+            self._graph_logits = torch.empty_like(logits)
+            self._graph_values = torch.empty_like(values_t)
+            with torch.cuda.graph(g):
+                h2 = F.relu(self.fc1(self._gpu_input_batch))  # type: ignore[arg-type]
+                l2 = self.policy_head(h2)
+                v2 = torch.tanh(self.value_head(h2)).reshape(-1)
+                self._graph_logits.copy_(l2)
+                self._graph_values.copy_(v2)
+            self._graph = g
+
+    def forward_batch_runtime(self, feats_batch: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        B, Fdim = int(feats_batch.shape[0]), int(feats_batch.shape[1])
+        self._ensure_initialized(input_dim=Fdim, policy_dim=int(self.policy_dim))
+        if self._device.type == "cuda" and self._gpu_input_batch is not None and self._pinned_batch is not None:
+            import torch.cuda
+            src = torch.from_numpy(feats_batch.astype(np.float32, copy=False))
+            # Stage into pinned
+            self._pinned_batch[:B].copy_(src, non_blocking=True)
+            # Copy to device on copy stream
+            assert self._copy_stream is not None
+            with torch.cuda.stream(self._copy_stream):
+                self._gpu_input_batch[:B].copy_(self._pinned_batch[:B], non_blocking=True)
+            torch.cuda.current_stream().wait_stream(self._copy_stream)
+            # Forward (graph if available)
+            self.fc1.eval(); self.policy_head.eval(); self.value_head.eval()
+            with torch.no_grad():
+                if self._graph is not None and self._graph_logits is not None and self._graph_values is not None:
+                    self._graph.replay()
+                    logits_t = self._graph_logits[:B]
+                    values_t = self._graph_values[:B]
+                else:
+                    h = F.relu(self.fc1(self._gpu_input_batch[:B]))
+                    logits_t = self.policy_head(h)
+                    values_t = torch.tanh(self.value_head(h)).reshape(-1)
+                priors_t = torch.softmax(logits_t, dim=1)
+            priors = priors_t.detach().cpu().numpy().astype(np.float32)
+            values = np.clip(values_t.detach().cpu().numpy().astype(np.float32), -1.0, 1.0)
+            return priors, values.reshape(-1)
+        # CPU fallback
+        # Reuse existing single-call batched helper logic
+        return infer_policy_value_from_features_batch_torch(self, feats_batch, int(self.policy_dim))
+
     # ----- API compatible forward/backward/step -----
     def forward(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:  # type: ignore[override]
         assert X.ndim == 2
@@ -291,17 +388,16 @@ def infer_policy_value_torch(net: MLPPolicyValueTorch, board: Board) -> Tuple[np
         value = value_t.detach().cpu().numpy().reshape(-1)[0]
 
     logits_np = logits.detach().cpu().numpy().reshape(-1).astype(np.float32)
+    # Softmax over LEGAL actions only for less compute
     legal = np.asarray(board.legal_moves(), dtype=np.int64)
-    masked = np.full((num_actions,), -1e9, dtype=np.float32)
-    masked[legal] = logits_np[legal]
-    x_ = masked - float(masked.max())
-    exp = np.exp(x_)
-    s = float(exp[legal].sum())
-    if s > 0:
-        priors = np.zeros_like(exp, dtype=np.float32)
-        priors[legal] = (exp[legal] / s).astype(np.float32)
+    lgl = logits_np[legal]
+    lgl = lgl - float(lgl.max())
+    e = np.exp(lgl)
+    s = float(e.sum())
+    priors = np.zeros((num_actions,), dtype=np.float32)
+    if s > 0.0 and np.isfinite(s):
+        priors[legal] = (e / s).astype(np.float32)
     else:
-        priors = np.zeros_like(exp, dtype=np.float32)
         priors[legal] = 1.0 / max(1, len(legal))
 
     # Komi-aware heuristic blend for early-game guidance
@@ -321,6 +417,43 @@ def infer_policy_value_torch(net: MLPPolicyValueTorch, board: Board) -> Tuple[np
         v_blend = v_net
 
     return priors, float(np.clip(v_blend, -1.0, 1.0))
+def infer_policy_value_from_features_batch_torch(net: MLPPolicyValueTorch,
+                                                feats_batch: np.ndarray,
+                                                num_actions: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Batched policy/value inference from precomputed features.
+    feats_batch: (B, F)
+    returns: (priors: (B, A), values: (B,))
+    """
+    assert feats_batch.ndim == 2
+    B, Fdim = feats_batch.shape
+    net._ensure_initialized(input_dim=int(Fdim), policy_dim=int(num_actions))
+    # Try persistent runtime path
+    try:
+        net.ensure_batch_runtime(batch_size=int(B), feature_dim=int(Fdim), use_cuda_graph=False)
+        return net.forward_batch_runtime(feats_batch)
+    except Exception:
+        pass
+
+    net.fc1.eval(); net.policy_head.eval(); net.value_head.eval()
+    with torch.no_grad():
+        use_amp = (net._device.type == "cuda")
+        amp_ctx = torch.cuda.amp.autocast if use_amp else torch.cpu.amp.autocast
+        with amp_ctx(enabled=use_amp):
+            x_cpu = torch.from_numpy(feats_batch.astype(np.float32, copy=False))
+            if net._device.type == "cuda":
+                x_cpu = x_cpu.pin_memory()
+                x = x_cpu.to(net._device, non_blocking=True)
+            else:
+                x = x_cpu
+            h = F.relu(net.fc1(x))
+            logits = net.policy_head(h)
+            values_t = torch.tanh(net.value_head(h)).reshape(-1)
+            priors_t = torch.softmax(logits, dim=1)
+    priors = priors_t.detach().cpu().numpy().astype(np.float32)
+    values = np.clip(values_t.detach().cpu().numpy().astype(np.float32), -1.0, 1.0)
+    return priors, values.reshape(-1)
+
 
 
 
@@ -516,21 +649,14 @@ def infer_policy_value_numpy(net: MLPPolicyValueNumpy, board: Board) -> Tuple[np
     net._ensure_initialized(input_dim=feats.shape[1], policy_dim=num_actions)
     logits, v, _ = net.forward(feats)
     logits = logits.reshape(-1)
-    # Mask logits to legal actions
-    legal = np.asarray(board.legal_moves(), dtype=np.int64)
-    logit_masked = np.full((num_actions,), -1e9, dtype=np.float32)
-    logit_masked[legal] = logits[legal]
-
-    # Softmax
-    x = logit_masked - np.max(logit_masked)
+    # Softmax over ALL actions; MCTS expansion will filter to legal actions.
+    x = logits - np.max(logits)
     exp = np.exp(x)
-    s = float(exp[legal].sum())
-    if not np.isfinite(s) or s <= 0:
-        priors = np.zeros((num_actions,), dtype=np.float32)
-        priors[legal] = 1.0 / max(1, len(legal))
+    s = float(np.sum(exp))
+    if np.isfinite(s) and s > 0.0:
+        priors = (exp / s).astype(np.float32)
     else:
-        priors = np.zeros_like(exp, dtype=np.float32)
-        priors[legal] = (exp[legal] / s).astype(np.float32)
+        priors = np.ones((num_actions,), dtype=np.float32) / float(max(1, num_actions))
     value = float(np.clip(v.reshape(-1)[0], -1.0, 1.0))
     return priors, value
 # ----- Backward-compatible aliases (default to Torch implementation) -----

@@ -53,9 +53,19 @@ def simulate_place_and_capture(grid: np.ndarray,
     """
     assert int(color) in (-1, 1)
     N = int(grid.shape[0])
+    opp = -int(color)
+    # Fast path: if no adjacent opponent stones, there cannot be any captures
+    # after placing at (r,c). We only need to write the stone and return.
+    has_adj_opp = False
+    for nr, nc in neighbors(N, r, c):
+        if int(grid[nr, nc]) == opp:
+            has_adj_opp = True
+            break
     new_grid = grid.copy()
     new_grid[r, c] = int(color)
-    opp = -int(color)
+    if not has_adj_opp:
+        return new_grid, [], False
+
     captures: List[Tuple[int, int, int]] = []
     captured_any = False
     for nr, nc in neighbors(N, r, c):

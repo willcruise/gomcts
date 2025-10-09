@@ -532,6 +532,7 @@ def _play_vs_katago_game(net: MLPPolicyValue,
             mcts.run(board, num_simulations=int(sims))
             temp = temperature_schedule(t, t0=float(temp_t0), t_min=float(temp_min), decay=float(temp_decay))
             pi = mcts.get_action_probs(temp=float(temp))
+            
 
             # Record training example (from our turns only)
             features.append(board.to_features().copy())
@@ -586,6 +587,11 @@ def _play_vs_katago_game(net: MLPPolicyValue,
                 print(f"[mcts] move {t} (us {our_color}) -> {r},{c} [{gtp_coord}]")
             # Inform KataGo of our move to keep states in sync
             gtp.play('B' if our_color == 'b' else 'W', gtp_coord)
+            # Root reuse: advance the MCTS root to the played action to preserve subtree
+            try:
+                mcts.advance_root(int(accepted_action))
+            except Exception:
+                pass
         else:
             # KataGo move via GTP
             move_str = gtp.genmove('B' if to_move_color == 'b' else 'W')
@@ -726,7 +732,7 @@ def train_vs_katago(net: MLPPolicyValue,
                     net.step(grads_g, lr=float(lr), save_every=int(max(1, checkpoint_every)))
                 except TypeError:
                     net.step(grads_g, lr=float(lr))
-                print(f"[train] vs-KataGo weights updated after game {gi+1}; loss={loss_g:.6f}")
+            print(f"[train] vs-KataGo weights updated after game {gi+1}; loss={loss_g:.6f}")
     finally:
         gtp.close()
 
