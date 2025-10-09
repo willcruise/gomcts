@@ -1,0 +1,3 @@
+katago/*.bin.gz
+katago/katago
+katago/*.cfg
