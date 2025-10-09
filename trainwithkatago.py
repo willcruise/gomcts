@@ -9,6 +9,9 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+# Ensure KataGo AppImage falls back to extract-and-run when FUSE utilities are missing
+os.environ.setdefault("APPIMAGE_EXTRACT_AND_RUN", "1")
+
 from board import Board
 from mcts import ScoreAwareMCTS, temperature_schedule
 from mcts_wrappers import build_mcts_standard
@@ -204,7 +207,7 @@ class GTPClient:
         self._proc.stdin.write(cmd + "\n")
         self._proc.stdin.flush()
 
-    def _read(self, timeout: float = 10.0) -> str:
+    def _read(self, timeout: float = 60.0) -> str:
         import time
         assert self._proc.stdout is not None
         lines: List[str] = []
@@ -546,14 +549,43 @@ def _play_vs_katago_game(net: MLPPolicyValue,
             else:
                 pi_masked = pi_masked / s
 
-            action = int(np.random.choice(len(pi_masked), p=pi_masked))
-            # Log our move in both index and GTP coord
-            gtp_coord = _index_to_gtp(action, size)
-            r, c = divmod(int(action), int(size))
-            print(f"[mcts] move {t} (us {our_color}) -> {r},{c} [{gtp_coord}]")
-            board.play(action)
+            pi_working = pi_masked.copy()
+            accepted_action: Optional[int] = None
+            retries = 0
+            while True:
+                total = float(pi_working.sum())
+                if total <= 0.0:
+                    raise RuntimeError(
+                        "No legal moves available after filtering illegal selections; check rule alignment."
+                    )
+                probs = pi_working / total
+                candidate = int(np.random.choice(len(probs), p=probs))
+                hist_before = len(board.history)
+                board.play(candidate)
+                if len(board.history) == hist_before:
+                    retries += 1
+                    pi_working[candidate] = 0.0
+                    # Refresh legal mask to avoid stale entries if rules changed after KataGo response
+                    current_legals = board.legal_moves().astype(int)
+                    invalid = set(np.where(pi_working > 0.0)[0]) - set(current_legals)
+                    for idx in invalid:
+                        pi_working[int(idx)] = 0.0
+                    print(
+                        f"[warn] filtered illegal MCTS move {candidate} (attempt {retries}); resampling."
+                    )
+                    continue
+                accepted_action = candidate
+                break
+
+            assert accepted_action is not None
+            gtp_coord = _index_to_gtp(accepted_action, size)
+            if accepted_action == board.pass_index:
+                print(f"[mcts] move {t} (us {our_color}) -> pass [pass]")
+            else:
+                r, c = divmod(int(accepted_action), int(size))
+                print(f"[mcts] move {t} (us {our_color}) -> {r},{c} [{gtp_coord}]")
             # Inform KataGo of our move to keep states in sync
-            gtp.play('B' if our_color == 'b' else 'W', _index_to_gtp(action, size))
+            gtp.play('B' if our_color == 'b' else 'W', gtp_coord)
         else:
             # KataGo move via GTP
             move_str = gtp.genmove('B' if to_move_color == 'b' else 'W')
@@ -585,9 +617,10 @@ def _play_vs_katago_game(net: MLPPolicyValue,
             and board.history[-2] == board.pass_index
         ):
             break
+
+        # Continue until both players pass; do not cap at board size so games can
+        # exceed N*N moves when captures reopen intersections.
         t += 1
-        if t >= size * size:
-            break
 
     # Final margin via unified helper (komi handled at target stage)
     s_final = float(rules.final_margin(
@@ -640,13 +673,13 @@ def train_vs_katago(net: MLPPolicyValue,
             from typing import Optional as _Optional
             _ = None  # placate linters about unused import
             gtp._send("name")
-            name = gtp._read()
+            name = gtp._read(timeout=180.0)
             print(f"[katago] engine name: {name}")
         except Exception as e:
             raise RuntimeError(f"KataGo did not respond to 'name': {e}")
         try:
             gtp._send("protocol_version")
-            proto = gtp._read()
+            proto = gtp._read(timeout=180.0)
             print(f"[katago] protocol: {proto}")
         except Exception as e:
             raise RuntimeError(f"KataGo did not respond to 'protocol_version': {e}")
