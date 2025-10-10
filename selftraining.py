@@ -350,6 +350,7 @@ def train_on_selfplay(net: MLPPolicyValue,
     # then apply SGD updates in the main process to a single weights file.
     # We keep this minimal to avoid changing workflow: workers only produce (X, pi, z) batches.
     if int(workers) > 1 and int(worker_games) > 0:
+        print(f"[INFO] Spawning {int(workers)} worker processes, {int(worker_games)} games each...")
         import multiprocessing as mp
         q: "mp.Queue" = mp.Queue(maxsize=max(8, int(workers) * 2))
         procs: list = []
@@ -363,6 +364,7 @@ def train_on_selfplay(net: MLPPolicyValue,
                                                           bool(include_komi_in_margin), device_str))
             p.daemon = True
             p.start()
+            print(f"[INFO] Started worker {wi+1}/{int(workers)} (PID: {p.pid})")
             procs.append(p)
         finished = 0
         gi = 0
