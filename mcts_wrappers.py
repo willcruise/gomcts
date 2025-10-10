@@ -83,6 +83,16 @@ def build_mcts_standard(net: MLPPolicyValue,
         use_inplace_simulation=True,
         max_children_per_node=16,
     )
+    # Propagate optional batched inference tuning knobs from net
+    try:
+        bs = getattr(net, "_mcts_batch_size", None)
+        if bs is not None:
+            setattr(mcts, "batch_size", int(bs))
+        fl_ms = getattr(net, "_mcts_flush_ms", None)
+        if fl_ms is not None:
+            setattr(mcts, "flush_timeout_ms", float(fl_ms))
+    except Exception:
+        pass
     # Attach a back-reference so nodes can see tree settings (for top-K)
     setattr(mcts.root if mcts.root is not None else mcts, 'tree', mcts)
     return mcts

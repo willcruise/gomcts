@@ -142,6 +142,10 @@ class ScoreAwareMCTS:
         self.use_inplace_simulation = bool(use_inplace_simulation)
         self.max_children_per_node = None if max_children_per_node is None else int(max(1, max_children_per_node))
 
+        # Batched inference tuning knobs (can be overridden by wrappers)
+        self.batch_size: int = 16
+        self.flush_timeout_ms: float = 2.0
+
         self.root: Optional[_ScoreNode] = None
         self._last_action: Optional[int] = None
 
@@ -379,7 +383,7 @@ class ScoreAwareMCTS:
             return 0.0
 
     # ----- Batched simulation -----
-    def _run_batched(self, root_state: Any, num_simulations: int, batch_size: int = 16, flush_timeout_ms: float = 2.0) -> None:
+    def _run_batched(self, root_state: Any, num_simulations: int) -> None:
         assert self.root is not None
         b = root_state
         leaves: List[Tuple[_ScoreNode, List[Tuple[_ScoreNode, int]], List[int], np.ndarray]] = []
@@ -388,8 +392,10 @@ class ScoreAwareMCTS:
             leaves.clear()
             # Phase A: selection only, collect up to batch_size leaves, or flush on timeout
             import time
-            deadline = time.time() + float(flush_timeout_ms) / 1000.0
-            while len(leaves) < int(batch_size) and sims_done + len(leaves) < int(num_simulations):
+            _bs = int(getattr(self, 'batch_size', 16))
+            _flush_ms = float(getattr(self, 'flush_timeout_ms', 2.0))
+            deadline = time.time() + float(_flush_ms) / 1000.0
+            while len(leaves) < _bs and sims_done + len(leaves) < int(num_simulations):
                 node = self.root
                 search_path: List[Tuple[_ScoreNode, int]] = []
                 moves_played: List[int] = []
@@ -422,7 +428,7 @@ class ScoreAwareMCTS:
                     break
 
             if not leaves:
-                sims_done += batch_size
+                sims_done += _bs
                 continue
 
             # Phase B: batched inference

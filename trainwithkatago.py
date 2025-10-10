@@ -503,7 +503,8 @@ def _play_vs_katago_game(net: MLPPolicyValue,
                          temp_decay: float,
                          min_game_len: int,
                          komi: float) -> Tuple[List[np.ndarray], List[np.ndarray], Tuple[int, float]]:
-    board = Board(size, enforce_rules=True, forbid_suicide=True, ko_rule='simple')
+    # Align rules with KataGo's default 'tromp-taylor' (positional superko, no suicide)
+    board = Board(size, enforce_rules=True, forbid_suicide=True, ko_rule='psk')
     board.rule_info = 0.0
 
     # Ensure KataGo is in a matching initial state

@@ -28,6 +28,7 @@ class MLPPolicyValueTorch:  # type: ignore[override]
         self.hidden_size = int(hidden_size)
         self.rng = np.random.RandomState(seed)
         self._device = torch.device(device)
+        self._use_cuda_graphs: bool = False
         torch.manual_seed(int(seed))
         # Prefer high-throughput matmul on CUDA (Ampere supports TF32)
         try:
@@ -60,6 +61,10 @@ class MLPPolicyValueTorch:  # type: ignore[override]
 
     # ----- persistence helpers -----
     def _weights_path_pt(self) -> str:
+        # Allow override via env var so worker processes can load from a snapshot
+        override = os.getenv("GOMCTS_WEIGHTS_PATH")
+        if override and isinstance(override, str) and len(override) > 0:
+            return override
         return os.path.join(os.path.dirname(__file__), "weights.pt")
 
     def _weights_path_pt_for_policy_dim(self, policy_dim: int) -> str:
@@ -430,7 +435,11 @@ def infer_policy_value_from_features_batch_torch(net: MLPPolicyValueTorch,
     net._ensure_initialized(input_dim=int(Fdim), policy_dim=int(num_actions))
     # Try persistent runtime path
     try:
-        net.ensure_batch_runtime(batch_size=int(B), feature_dim=int(Fdim), use_cuda_graph=False)
+        net.ensure_batch_runtime(
+            batch_size=int(B),
+            feature_dim=int(Fdim),
+            use_cuda_graph=bool(getattr(net, "_use_cuda_graphs", False)),
+        )
         return net.forward_batch_runtime(feats_batch)
     except Exception:
         pass
