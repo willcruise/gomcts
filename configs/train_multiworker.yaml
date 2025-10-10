@@ -1,0 +1,36 @@
+# Multi-worker parallel training configuration (recommended for Jetson)
+# Total games: 6 workers × 167 games each = 1002 games total
+
+games: 1002
+sims: 1000
+size: 9
+device: cuda
+require_gpu: true
+
+# Learning parameters
+lr: 0.003
+value_weight: 1.0
+l2: 0.0001
+
+# Multi-worker parallelism (6 workers for 6 CPU cores)
+workers: 6
+worker_games: 167
+
+# Performance tuning
+mcts_batch_size: 256
+use_cuda_graphs: true
+
+# Checkpointing
+checkpoint_every: 50
+log_every: 10
+
+# Game parameters
+komi: 6.5
+min_game_len: 50
+c_puct: 2.0
+dirichlet_alpha: 0.0
+dirichlet_frac: 0.25
+dirichlet_c0: 10.0
+temp_t0: 1.0
+temp_min: 0.25
+temp_decay: 0.995

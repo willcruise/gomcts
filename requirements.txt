@@ -1,3 +1,4 @@
 numpy>=1.24,<3.0
 # Skip pinned torch on Jetson/ARM64; install Jetson's wheel or use container
 torch==2.3.1; platform_machine != "aarch64"
+pyyaml>=6.0

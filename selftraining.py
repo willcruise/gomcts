@@ -488,6 +488,7 @@ def main() -> None:
         pass  # Already set
     
     parser = argparse.ArgumentParser(description="Self-play training for NxN Go (toy)")
+    parser.add_argument("--config", type=str, default=None, help="path to YAML config file (command-line args override config)")
     parser.add_argument("--games", type=int, default=10, help="number of self-play games")
     parser.add_argument("--sims", type=int, default=64, help="MCTS simulations per move")
     parser.add_argument("--komi", type=float, default=6.5, help="komi for winner evaluation")
@@ -527,6 +528,27 @@ def main() -> None:
     parser.add_argument("--eval_dir", type=str, default=None, help="directory to store eval snapshots")
     # Rollout removed
     args = parser.parse_args()
+
+    # Load config file if provided
+    if args.config:
+        import yaml
+        import os
+        if not os.path.exists(args.config):
+            raise FileNotFoundError(f"Config file not found: {args.config}")
+        with open(args.config, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        # Apply config values, but only for args that weren't explicitly set on command line
+        # We detect explicit CLI args by comparing with defaults
+        defaults = parser.parse_args([])  # Parse with no args to get defaults
+        for key, value in config.items():
+            if hasattr(args, key):
+                # Only override if the current value matches the default (wasn't set via CLI)
+                if getattr(args, key) == getattr(defaults, key):
+                    setattr(args, key, value)
+        
+        if not args.quiet:
+            print(f"[INFO] Loaded config from: {args.config}")
 
     # Device selection with optional strict GPU requirement
     if args.device == "auto":

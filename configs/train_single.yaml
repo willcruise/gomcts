@@ -1,0 +1,36 @@
+# Single-worker training configuration (simple, good for testing)
+# Total games: 100
+
+games: 100
+sims: 1000
+size: 9
+device: cuda
+require_gpu: true
+
+# Learning parameters
+lr: 0.003
+value_weight: 1.0
+l2: 0.0001
+
+# Single worker (no parallelism)
+workers: 1
+worker_games: 0
+
+# Performance tuning
+mcts_batch_size: 128
+use_cuda_graphs: true
+
+# Checkpointing
+checkpoint_every: 25
+log_every: 5
+
+# Game parameters
+komi: 6.5
+min_game_len: 50
+c_puct: 2.0
+dirichlet_alpha: 0.0
+dirichlet_frac: 0.25
+dirichlet_c0: 10.0
+temp_t0: 1.0
+temp_min: 0.25
+temp_decay: 0.995
