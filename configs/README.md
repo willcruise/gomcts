@@ -17,9 +17,10 @@ This directory contains YAML configuration files for different training scenario
 - **Use when:** Standard training runs on Jetson Orin Nano
 
 ### `train_gpu_fast.yaml`
-- **Purpose:** Maximum performance with evaluation gates
+- **Purpose:** High-performance training with evaluation gates
 - **Total games:** 504 (6 workers × 84 each)
-- **Workers:** 6
+- **Workers:** 6 (matches CPU cores)
+- **Batch size:** 512 (larger for more GPU utilization)
 - **Use when:** Overnight/long training with quality control
 
 ## Usage
