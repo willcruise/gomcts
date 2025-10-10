@@ -1,0 +1,45 @@
+# Custom training configuration with evaluation gates
+# Based on train_gpu_fast.yaml but with customizable parameters
+# Total games: 6 workers × 167 games each = 1002 games total
+
+games: 1002
+sims: 1000
+size: 9
+device: cuda
+require_gpu: true
+
+# Learning parameters
+lr: 0.003
+value_weight: 1.0
+l2: 0.0001
+
+# Multi-worker parallelism (customize worker_games as needed)
+workers: 6
+worker_games: 167       # <-- CUSTOMIZE THIS (e.g., 100, 167, 200)
+
+# Performance tuning (customize batch_size as needed)
+mcts_batch_size: 256    # <-- CUSTOMIZE THIS (e.g., 128, 256, 512)
+mcts_flush_ms: 1.0
+use_cuda_graphs: true
+
+# Checkpointing
+checkpoint_every: 50
+log_every: 10
+
+# Evaluation gates (quality control)
+eval_every: 100
+eval_games: 50
+eval_threshold: 0.55
+eval_swap_colors: true
+
+# Game parameters
+komi: 6.5
+min_game_len: 50
+c_puct: 2.0
+dirichlet_alpha: 0.0
+dirichlet_frac: 0.25
+dirichlet_c0: 10.0
+temp_t0: 1.0
+temp_min: 0.25
+temp_decay: 0.995
+
