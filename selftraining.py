@@ -478,6 +478,13 @@ def train_on_selfplay(net: MLPPolicyValue,
 
 
 def main() -> None:
+    # Force spawn method for multiprocessing compatibility in Docker
+    import multiprocessing as mp
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # Already set
+    
     parser = argparse.ArgumentParser(description="Self-play training for NxN Go (toy)")
     parser.add_argument("--games", type=int, default=10, help="number of self-play games")
     parser.add_argument("--sims", type=int, default=64, help="MCTS simulations per move")
