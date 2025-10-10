@@ -1,4 +1,38 @@
-katago/*.bin.gz
-katago/katago
-katago/*.cfg
-katago/*.bin.gz
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Model weights (large binary files - backup elsewhere!)
+weights.pt
+weights.npz
+*.pt
+*.pth
+*.ckpt
+
+# Training artifacts
+eval_snapshots/
+*.log
+gtp_logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+~*
+
+# Large data
+katago_archives/
+
+# Debug
+DEBUG_SUMMARY.md
