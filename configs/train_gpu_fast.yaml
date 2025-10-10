@@ -1,5 +1,5 @@
 # High-performance GPU training with evaluation gates
-# Total games: 8 workers × 63 games each = 504 games total
+# Total games: 6 workers × 84 games each = 504 games total
 # Best for overnight/long training runs
 
 games: 504
@@ -13,9 +13,9 @@ lr: 0.003
 value_weight: 1.0
 l2: 0.0001
 
-# Aggressive multi-worker parallelism
-workers: 8
-worker_games: 63
+# Multi-worker parallelism (matches 6 CPU cores)
+workers: 6
+worker_games: 84
 
 # Performance tuning (larger batches for GPU)
 mcts_batch_size: 512

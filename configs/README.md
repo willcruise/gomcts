@@ -18,8 +18,8 @@ This directory contains YAML configuration files for different training scenario
 
 ### `train_gpu_fast.yaml`
 - **Purpose:** Maximum performance with evaluation gates
-- **Total games:** 504 (8 workers × 63 each)
-- **Workers:** 8
+- **Total games:** 504 (6 workers × 84 each)
+- **Workers:** 6
 - **Use when:** Overnight/long training with quality control
 
 ## Usage
@@ -98,6 +98,10 @@ python3 selftraining.py --config configs/my_custom.yaml
 ## Notes
 
 - Command-line arguments always override config file values
-- Worker count should match CPU core count for best performance
+- **Worker count should match CPU core count** (6 cores on Jetson Orin Nano = 6 workers max)
+  - Using more workers than cores causes context switching overhead and slows down training
+  - Using fewer workers wastes CPU capacity
 - Larger `mcts_batch_size` uses more GPU but may not always be faster
+  - For MCTS, CPU is usually the bottleneck, not GPU
+  - Batch sizes of 128-512 are typically optimal
 - Enable `eval_every` for long training runs to ensure quality improvements
