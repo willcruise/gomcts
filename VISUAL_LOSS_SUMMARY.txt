@@ -1,0 +1,374 @@
+═══════════════════════════════════════════════════════════════
+  NEURAL NETWORK LOSS FUNCTION - VISUAL GUIDE
+═══════════════════════════════════════════════════════════════
+
+                   NETWORK ARCHITECTURE
+                   ═══════════════════
+
+    Board State (9x9 Go)
+           │
+           │ to_features()
+           ▼
+    [324 numbers]  ← 4 feature planes × 81 positions
+           │
+           │
+           ▼
+    ┌─────────────────┐
+    │  Hidden Layer   │ ← Shared representation
+    │   (256 units)   │    Learns useful patterns
+    └─────────────────┘
+           │
+           │
+      ┌────┴────┐
+      │         │
+      ▼         ▼
+ ┌─────────┐ ┌─────────┐
+ │ Policy  │ │ Value   │
+ │  Head   │ │  Head   │
+ └─────────┘ └─────────┘
+      │         │
+      ▼         ▼
+   [82 probs] [1 score]
+   (moves)    (-1 to +1)
+
+
+═══════════════════════════════════════════════════════════════
+  LOSS FUNCTION COMPONENTS
+═══════════════════════════════════════════════════════════════
+
+Total Loss = [Policy Loss] + c_v × [Value Loss] + l2 × [Regularization]
+             └─────┬──────┘        └─────┬─────┘       └────┬────┘
+                   │                     │                   │
+                   ▼                     ▼                   ▼
+          Cross-Entropy (CE)      Mean Squared Error    Weight Decay
+               ~0.5-3.0                 ~0.1-1.0           ~0.0001
+
+
+───────────────────────────────────────────────────────────────
+1. POLICY HEAD LOSS (Cross-Entropy)
+───────────────────────────────────────────────────────────────
+
+Measures: How well network predicts the correct move
+
+Formula: CE = -Σ(target[i] × log(prediction[i]))
+
+Example Training Step:
+────────────────────────
+
+Position:  ● ● ● ○ ○ ○ · · ·
+           ● · ● ○ · ○ · · ·
+           ● ● ○ ○ ○ · · · ·
+           ...
+           
+Pro's move: E5 (action 40)
+
+Target distribution (one-hot):
+  Action:  0    1    2   ...  40   ...  80   81
+  Target: [0.0, 0.0, 0.0, ... 1.0, ... 0.0, 0.0]
+                               ↑
+                             E5 = 100% probability
+
+Network prediction (before training):
+  Action:  0    1    2   ...  40   ...  80   81
+  Pred:   [0.01, 0.02, 0.03, ... 0.05, ... 0.01, 0.02]
+                                  ↑
+                                E5 = only 5%!
+
+Loss calculation:
+  CE = -log(0.05) = 2.996  ← HIGH LOSS (bad!)
+  
+Gradient: Δ = prediction - target
+          Δ[40] = 0.05 - 1.0 = -0.95  ← Push UP
+          Δ[other] = small_value - 0 = +small ← Push DOWN
+          
+After 1 gradient step (lr=0.001):
+  Weight[40] += 0.001 × 0.95 = increased!
+  
+Network prediction (after training):
+  Pred[40] = 0.15 (was 0.05) ← Improved!
+  CE = -log(0.15) = 1.897 ← LOWER LOSS (better!)
+
+After many steps:
+  Pred[40] = 0.65 ← Network now confident in E5!
+  CE = -log(0.65) = 0.431 ← LOW LOSS (good!)
+
+
+───────────────────────────────────────────────────────────────
+2. VALUE HEAD LOSS (Mean Squared Error)
+───────────────────────────────────────────────────────────────
+
+Measures: How well network evaluates position strength
+
+Formula: MSE = (prediction - target)²
+
+Example Training Step:
+────────────────────────
+
+Position A (Black to move):
+  Board:  ● ● ● ○ ○ ○ · · ·
+          ● · ● ○ · ○ · · ·
+          Black has more stones
+          
+  Game eventually: Black Won! → target = +1.0
+  
+  Network prediction: v = +0.2 (slightly optimistic for Black)
+  
+  MSE = (0.2 - 1.0)² = 0.64
+  
+  Gradient: Δ = 2(0.2 - 1.0) = -1.6 ← Push UP
+  
+  After training: v = 0.5 (more optimistic) ← Better!
+  MSE = (0.5 - 1.0)² = 0.25 ← Lower loss
+
+Position B (White to move, same game):
+  Same board, but White's perspective
+  
+  Game result: Black Won → target = -1.0 (White lost!)
+  
+  Network prediction: v = +0.1 (thinks White is ahead - WRONG!)
+  
+  MSE = (0.1 - (-1.0))² = 1.21 ← HIGH LOSS
+  
+  Gradient: Δ = 2(0.1 - (-1.0)) = 2.2 ← Push DOWN
+  
+  After training: v = -0.3 (more pessimistic) ← Better!
+  MSE = (-0.3 - (-1.0))² = 0.49 ← Lower loss
+
+
+───────────────────────────────────────────────────────────────
+3. REGULARIZATION (L2 Weight Decay)
+───────────────────────────────────────────────────────────────
+
+Prevents: Overfitting (memorizing training positions)
+
+Formula: Reg = Σ(weight²) for all weights
+
+Example:
+────────
+
+Without regularization:
+  Weights can grow very large to fit training data perfectly
+  
+  W_policy[10,5] = 127.3  ← Huge!
+  W_policy[20,8] = -89.4
+  W_value[15,0] = 234.1
+  
+  Network memorizes specific positions
+  Doesn't generalize to new positions ✗
+
+With regularization (l2 = 1e-4):
+  Large weights are penalized
+  
+  Loss = CE + MSE + 0.0001 × (127.3² + 89.4² + 234.1² + ...)
+                            └──────────────┬──────────────┘
+                                   Adds ~10,000 to loss!
+  
+  Gradient descent reduces weights:
+  W_policy[10,5] = 2.3  ← Moderate
+  W_policy[20,8] = -1.7
+  W_value[15,0] = 3.1
+  
+  Network learns general patterns ✓
+  Generalizes to new positions ✓
+
+
+═══════════════════════════════════════════════════════════════
+  COMPLETE TRAINING EXAMPLE
+═══════════════════════════════════════════════════════════════
+
+Batch of 128 positions from pro games
+
+Position Sample:
+  Board: (9x9 with stones)
+  Pro move: E5
+  Game result: Black won
+
+Step 1: Forward Pass
+────────────────────
+
+  features → fc1 → relu → [policy_head, value_head]
+                            │           │
+                            ▼           ▼
+                       logits (82)   value (1)
+                            │           │
+                         softmax      tanh
+                            │           │
+                            ▼           ▼
+                      probs (82)    v (-1 to 1)
+
+  Output:
+    probs[40] = 0.05  (5% confidence in E5)
+    v = 0.2           (thinks Black is slightly ahead)
+
+Step 2: Compute Losses
+───────────────────────
+
+  Policy Loss:
+    CE = -log(0.05) = 2.996
+    
+  Value Loss:
+    MSE = (0.2 - 1.0)² = 0.64
+    
+  Regularization:
+    Reg = Σ(W²) = 150.0
+    
+  Total Loss:
+    loss = 2.996 + 1.0 × 0.64 + 1e-4 × 150.0
+         = 2.996 + 0.64 + 0.015
+         = 3.651
+
+Step 3: Backward Pass (Automatic in PyTorch!)
+──────────────────────────────────────────────
+
+  loss.backward()  ← Computes all gradients via chain rule
+  
+  Gradients computed:
+    ∂loss/∂policy_head weights  ← from CE
+    ∂loss/∂value_head weights   ← from MSE  
+    ∂loss/∂fc1 weights          ← from BOTH! (shared layer)
+
+Step 4: Update Weights
+──────────────────────
+
+  Learning rate: lr = 0.001
+  
+  policy_head.weight -= 0.001 × ∂loss/∂policy_head
+  value_head.weight  -= 0.001 × ∂loss/∂value_head
+  fc1.weight         -= 0.001 × ∂loss/∂fc1
+
+Step 5: Check Improvement
+─────────────────────────
+
+  Forward pass again (same position):
+    probs[40] = 0.15  (was 0.05) ← Improved!
+    v = 0.35          (was 0.2)  ← Improved!
+    
+  New loss:
+    CE = -log(0.15) = 1.897 (was 2.996)
+    MSE = (0.35 - 1.0)² = 0.42 (was 0.64)
+    loss = 1.897 + 0.42 + 0.015 = 2.332 (was 3.651) ✓
+
+After 1000 training steps:
+    probs[40] = 0.65  ← High confidence!
+    v = 0.82          ← Accurate evaluation!
+    loss = 0.431 + 0.032 + 0.015 = 0.478 ← Much better!
+
+
+═══════════════════════════════════════════════════════════════
+  HYPERPARAMETER EFFECTS
+═══════════════════════════════════════════════════════════════
+
+Value Weight (c_v):
+────────────────────
+
+  c_v = 0.5:  loss = CE + 0.5×MSE + l2×Reg
+              → Policy-focused
+              → Learns good moves faster
+              → Position evaluation less accurate
+
+  c_v = 1.0:  loss = CE + 1.0×MSE + l2×Reg  ← DEFAULT
+              → Balanced
+              → Both heads improve together
+
+  c_v = 2.0:  loss = CE + 2.0×MSE + l2×Reg
+              → Value-focused
+              → Position evaluation very accurate
+              → Move prediction slightly worse
+
+
+L2 Regularization:
+──────────────────
+
+  l2 = 1e-5:  Weak regularization
+              → May overfit (memorize training data)
+              → Good if you have huge dataset
+
+  l2 = 1e-4:  Standard regularization ← DEFAULT
+              → Good balance
+              → Works for most cases
+
+  l2 = 1e-3:  Strong regularization
+              → Prevents overfitting well
+              → May underfit (weights too constrained)
+
+
+Learning Rate (lr):
+───────────────────
+
+  lr = 1e-4:  Slow and steady
+              → Takes longer to converge
+              → Very stable
+              
+  lr = 1e-3:  Good default ← RECOMMENDED
+              → Reasonable speed
+              → Usually stable
+              
+  lr = 1e-2:  Fast but risky
+              → Quick convergence
+              → May be unstable (loss oscillates)
+
+
+═══════════════════════════════════════════════════════════════
+  MONITORING TRAINING
+═══════════════════════════════════════════════════════════════
+
+Good Training:
+──────────────
+
+  Epoch 1:  Train Loss=3.821, Val Loss=3.945
+  Epoch 2:  Train Loss=2.456, Val Loss=2.589  ← Both decreasing ✓
+  Epoch 3:  Train Loss=1.823, Val Loss=1.956
+  Epoch 5:  Train Loss=1.234, Val Loss=1.389  ← Val close to train ✓
+  Epoch 10: Train Loss=0.876, Val Loss=1.012
+  
+  Policy Accuracy: 35% → 42% → 51% → 58%  ← Improving ✓
+
+Problems:
+─────────
+
+  Loss Increasing:
+    Epoch 1: Loss=3.821
+    Epoch 2: Loss=4.123  ← Going UP! ✗
+    → Learning rate too high
+    → Solution: Reduce lr to 1e-4
+    
+  Overfitting:
+    Epoch 5:  Train Loss=1.234, Val Loss=1.389  ← Close
+    Epoch 10: Train Loss=0.456, Val Loss=2.134  ← Val >> Train ✗
+    → Memorizing training data
+    → Solution: Increase l2 to 1e-3
+    
+  Plateau:
+    Epoch 5:  Loss=1.823
+    Epoch 10: Loss=1.821  ← Not improving ✗
+    Epoch 15: Loss=1.819
+    → Learning rate too low OR need more data
+    → Solution: Increase lr to 3e-3 OR get more games
+
+
+═══════════════════════════════════════════════════════════════
+  QUICK REFERENCE
+═══════════════════════════════════════════════════════════════
+
+Loss Function:
+  loss = CE + c_v × MSE + l2 × Reg
+
+Where:
+  CE  = -Σ(target × log(prediction))     [Policy]
+  MSE = (prediction - target)²           [Value]
+  Reg = Σ(weight²)                       [All weights]
+
+Defaults:
+  c_v = 1.0    (balance policy and value)
+  l2  = 1e-4   (moderate regularization)
+  lr  = 1e-3   (learning rate)
+
+Goal:
+  Minimize loss → Better move predictions AND position evaluation
+
+Key Insight:
+  Both heads share hidden layer → Learn together!
+  Good features for moves = Good features for evaluation
+
+═══════════════════════════════════════════════════════════════
+

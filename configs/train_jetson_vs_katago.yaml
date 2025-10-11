@@ -1,0 +1,37 @@
+# Jetson-optimized training vs KataGo
+# Focus: Quality training with limited compute
+# Strategy: Train against strong opponent (KataGo) for sample efficiency
+
+games: 500
+sims: 64              # Lower sims for Jetson, but KataGo provides strong signal
+size: 9
+device: cuda
+require_gpu: false    # Don't fail if GPU issues on Jetson
+
+# Learning parameters
+lr: 0.001             # Slightly lower LR for stability
+value_weight: 1.0
+l2: 0.0001
+
+# Performance tuning for Jetson
+mcts_batch_size: 32   # Reduced for Jetson memory constraints
+use_cuda_graphs: false # May cause issues on Jetson
+
+# Checkpointing
+checkpoint_every: 10
+log_every: 5
+
+# Game parameters
+komi: 6.5
+min_game_len: 50
+c_puct: 2.0
+dirichlet_alpha: 0.15  # Enable exploration noise
+dirichlet_frac: 0.25
+dirichlet_c0: 10.0
+temp_t0: 1.0
+temp_min: 0.25
+temp_decay: 0.995
+
+# KataGo settings (uses defaults from katago/ folder)
+auto_install_assets: true
+

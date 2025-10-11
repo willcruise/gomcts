@@ -1,4 +1,5 @@
 from copy import deepcopy
+from typing import Optional
 import numpy as np
 import rules
 
@@ -6,7 +7,7 @@ import rules
 class Board:
     def __init__(self, size: int = 9, strict_illegals: bool = False,
                  enforce_rules: bool = False, forbid_suicide: bool = False,
-                 ko_rule: str | None = None):
+                 ko_rule: Optional[str] = None):
         # board size (N x N)
         self.size = int(size)
         # +1 black, -1 white
