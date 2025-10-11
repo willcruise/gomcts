@@ -39,8 +39,6 @@ def _selfplay_worker(q, seed_off: int, games_n: int,
             pass
     except Exception:
         pass
-    N = int(size)
-    tau = max(1.0, 0.5 * N)
     for _ in range(int(games_n)):
         feats, pis, outcome = self_play_game(
             local_net,
@@ -57,9 +55,11 @@ def _selfplay_worker(q, seed_off: int, games_n: int,
             min_game_len=int(min_game_len),
         )
         if feats:
-            _winner, s_final = outcome
-            margin = float(s_final) - (float(komi) if include_komi_in_margin else 0.0)
-            z_black = float(np.tanh(margin / float(tau)))
+            winner, s_final = outcome
+            # Apply komi to determine the actual winner for training
+            # In Go, White gets komi compensation, so: Black_score - White_score - komi
+            final_margin = float(s_final) - float(komi)
+            z_black = 1.0 if final_margin > 0 else (-1.0 if final_margin < 0 else 0.0)
             Xg = np.stack([f.astype(np.float32) for f in feats], axis=0)
             Pig = np.stack([p for p in pis], axis=0)
             Z_list: List[np.ndarray] = []
@@ -410,12 +410,12 @@ def train_on_selfplay(net: MLPPolicyValue,
             temp_decay=temp_decay,
             min_game_len=int(min_game_len),
         )
-        # Unpack outcome and build continuous margin-based targets z in [-1,1]
+        # Unpack outcome and build discrete outcome targets z in {-1, 0, +1} like AlphaZero
         winner, s_final = outcome
-        N = int(size)
-        tau = max(1.0, 0.5 * N)
-        margin = float(s_final) - (float(komi) if include_komi_in_margin else 0.0)
-        z_black = float(np.tanh(margin / float(tau)))
+        # Apply komi to determine the actual winner for training
+        # In Go, White gets komi compensation, so: Black_score - White_score - komi
+        final_margin = float(s_final) - float(komi)
+        z_black = 1.0 if final_margin > 0 else (-1.0 if final_margin < 0 else 0.0)
 
         # assign outcomes z from current player's perspective at each step
         # board.turn starts at +1 (black). After k moves, player to move flips each time.

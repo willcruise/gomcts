@@ -714,10 +714,10 @@ def train_vs_katago(net: MLPPolicyValue,
             )
 
             winner, s_final = outcome
-            N = int(size)
-            tau = max(1.0, 0.5 * N)
-            margin = float(s_final) - (float(komi) if include_komi_in_margin else 0.0)
-            z_black = float(np.tanh(margin / float(tau)))
+            # Apply komi to determine the actual winner for training
+            # In Go, White gets komi compensation, so: Black_score - White_score - komi
+            final_margin = float(s_final) - float(komi)
+            z_black = 1.0 if final_margin > 0 else (-1.0 if final_margin < 0 else 0.0)
 
             # Build per-sample targets from the perspective of our agent at each recorded step
             if feats:
