@@ -16,6 +16,7 @@ weights.npz
 eval_snapshots/
 *.log
 gtp_logs/
+artifacts/
 
 # OS files
 .DS_Store
@@ -34,5 +35,5 @@ Thumbs.db
 # Large data
 katago_archives/
 
-# Debug
-DEBUG_SUMMARY.md
+## Debug notes
+# (intentionally left blank)
